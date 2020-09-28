@@ -39,6 +39,8 @@ const UIDNONCE = new Uint8Array([ 2,   3,   5,   7,  11,  13,  17,  19,
 const CHANONCE = new Uint8Array([0x24, 0x3f, 0x6a, 0x88, 0x85, 0xa3, 0x08, 0xd3,
 								 0x13, 0x19, 0x8a, 0x2e, 0x03, 0x70, 0x73, 0x44,
 								 0xa4, 0x09, 0x38, 0x22, 0x29, 0x9f, 0x31, 0xd0]);
+const SALTSTR = StringToUint8("ZpncSalt");
+const PERSTR = StringToUint8('ZpincApp');
 const HDRLEN = 18;
 
 /* Msg type flags */
@@ -65,6 +67,7 @@ const DH_BITS = 256; //32 bytes
 
 let gMyDhKey = {
 	pw: null,
+	bdpw: null,
 	sid: null,
 	group: null,
 	private: null,
@@ -209,12 +212,17 @@ function initDhBd(myuid) {
 
 function setDhPublic(myuid, sid) {
 	let siddb_sorted = Object.fromEntries(Object.entries(gSidDb).sort());
-	let hash = new BLAKE2s(32, { salt: sid, personalization: StringToUint8("cbd-r255"), key: gMyDhKey.pw });
+	let users = "";
 	for (let userid in siddb_sorted) {
-		console.log("Set dh public, found user " + userid);
-		hash.update(StringToUint8(userid));
+		users += userid;
 	}
-	gMyDhKey.group = ristretto255.fromHash(hash.digest());
+	const userarr = StringToUint8(users);
+	let arr = new Uint8Array(sid.byteLength + gMyDhKey.bdpw.byteLength + userarr.byteLength);
+	arr.set(sid, 0);
+	arr.set(gMyDhKey.bdpw, sid.byteLength);
+	arr.set(userarr, sid.byteLength + gMyDhKey.bdpw.byteLength);
+	const sha512 = nacl.hash(arr);
+	gMyDhKey.group = ristretto255.fromHash(sha512);
 	gMyDhKey.private = ristretto255.scalar.getRandom();
 	gMyDhKey.public = ristretto255.scalarMult(gMyDhKey.private, gMyDhKey.group);
 	if (gMyDhKey.public) {
@@ -306,7 +314,7 @@ function processBd(myuid, uid, msgtype, message) {
 			if (prevkey && nextkey) {
 				let step = ristretto255.sub(nextkey, prevkey);
 				gMyDhKey.bd = ristretto255.scalarMult(gMyDhKey.private, step);
-				console.log("Setting Bd " + gMyDhKey.bd);
+				//console.log("Setting Bd " + gMyDhKey.bd);
 				gBdDb[myuid] = Uint8ToString(gMyDhKey.bd);
 			}
 
@@ -537,33 +545,54 @@ function processOnMessageData(msg) {
 	if(myuid == uid) { //resync
 		initSid(myuid);
 	}
-	else if(!gMyDhKey.sid && keysz > 0) {
-		initSid(myuid);
-	}
 	else if (uid != myuid) {
 		if (!gMyDhKey.sid || !isEqualSid(gMyDhKey.sid, sid)) {
 			initSid(myuid);
+			//console.log("RX: setting sid to " + sid + " mysid " + gMyDhKey.sid);
 			setSid(myuid, sid);
 			if (!(msgtype & MSGISPRESENCEACK)) {
 				msgtype |= MSGPRESACKREQ; // inform upper layer about presence ack requirement
 			}
 		}
-		if(!gSidDb[uid] || !isEqualSid(gSidDb[uid], sid)) {
+		if(!gSidDb[uid]) {
 			gSidDb[uid] = sid;
+			if(gMyDhKey.public) {
+				//reset
+				let siddb_sorted = Object.fromEntries(Object.entries(gSidDb).sort());
+
+				let pubok = true;
+				let cnt = 0;
+				for (let userid in siddb_sorted) {
+					//console.log("Found sid " +  gSidDb[userid] + " for user " + userid);
+					if(!isEqualSid(gSidDb[userid], sid)) {
+						pubok = false;
+						break;
+					}
+					cnt++;
+				}
+				if(cnt > 1 && pubok) {
+					console.log("Resetting public key for sid " + sid + " cnt " + cnt);
+					setDhPublic(myuid, sid);
+				}
+			}
 		}
-		else if(isEqualSid(gSidDb[uid], sid)) {
+		else if(isEqualSid(gSidDb[uid], sid) && !gMyDhKey.public) {
 			let siddb_sorted = Object.fromEntries(Object.entries(gSidDb).sort());
-			console.log("We could try to have public key now");
+
 			let pubok = true;
+			let cnt = 0;
 			for (let userid in siddb_sorted) {
-				console.log("Found sid " +  gSidDb[userid] + " for user " + userid);
+				//console.log("Found sid " +  gSidDb[userid] + " for user " + userid);
 				if(!isEqualSid(gSidDb[userid], sid)) {
 					pubok = false;
 					break;
 				}
+				cnt++;
 			}
-			console.log("Pubok " + pubok);
-			//WHEN TO SET TO PUBLIC KEY?
+			if(cnt > 1 && pubok) {
+				//console.log("Setting public key for sid " + sid + " cnt " + cnt);
+				setDhPublic(myuid, sid);
+			}
 		}
 	}
 
@@ -745,6 +774,16 @@ function getSid(myuid) {
 
 function setSid(myuid, sid) {
 	//console.log("Setting setsid to " + sid);
+	//scrypt
+	scrypt(gMyDhKey.pw, sid, {
+		N: SCRYPT_N,
+		r: SCRYPT_R,
+		p: SCRYPT_P,
+		dkLen: SCRYPT_DKLEN,
+		encoding: 'binary'
+	}, function (derivedKey) {
+		gMyDhKey.bdpw = derivedKey;
+	});
 	gMyDhKey.sid = sid;
 	gSidDb[myuid] = sid;
 }
@@ -765,9 +804,8 @@ onmessage = function (e) {
 				let prevBdKey = e.data[8];
 
 				//salt
-				let salt = new BLAKE2s(SCRYPT_SALTLEN, passwd.slice(0, 32));
+				let salt = new BLAKE2s(SCRYPT_SALTLEN, { salt: SALTSTR, personalization: PERSTR, key: passwd.slice(0, 32) });
 				salt.update(passwd);
-				salt.update(StringToUint8('salty'));
 
 				//scrypt
 				scrypt(passwd, salt.digest(), {
@@ -781,6 +819,7 @@ onmessage = function (e) {
 				});
 
 				gMyDhKey.pw = passwd;
+
 				//gMyDhKey.private = ristretto255.scalar.getRandom();
 				/*
 				gMyDhKey.group = ristretto255.fromHash(passwd);
@@ -904,27 +943,30 @@ onmessage = function (e) {
 						let pub = Uint8ToString(gMyDhKey.public);
 						keysz += pub.length;
 						data += pub;
+						//console.log("TX: Adding pub key " + gMyDhKey.public);
 					}
 					else {
+						//console.log("TX: Pub key is null!");
 						padlen += DH_BITS/8;
 					}
 					//add BD key, if it exists
 					if (gMyDhKey.bd && !(msgtype & MSGISPRESENCEACK)) {
 						if(bdIsZeroes(gMyDhKey.bd)) {
+							//console.log("Adding ISDBONE flag");
 							flagstamp |= ISBDONE;
 							padlen += DH_BITS/8;
 						}
 						else {
 							let bd = Uint8ToString(gMyDhKey.bd);
-							//console.log("Bd " + bd + " dhkeybd " + gMyDhKey.bd);
+							//console.log("TX: Bd " + bd + " dhkeybd " + gMyDhKey.bd);
 							keysz += bd.length;
 							data += bd;
 						}
 						let sidcnt = Object.keys(gDhDb).length;
 						let pubcnt = Object.keys(gDhDb).length;
 						let bdcnt = Object.keys(gBdDb).length;
-						//console.log("During send pubcnt " + pubcnt + " bdcnt " + bdcnt)
-						if (sidcnt == pubcnt == bdcnt && gMyDhKey.secret != null) {
+						//console.log("During send sidcnt " + sidcnt + " pubcnt " + pubcnt + " bdcnt " + bdcnt);
+						if (sidcnt == pubcnt && pubcnt == bdcnt && gMyDhKey.secret != null) {
 							flagstamp |= ISBDACK;
 							if (gBdAckDb[uid] == null) {
 								//console.log("Adding self to bdack db");
