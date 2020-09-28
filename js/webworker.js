@@ -212,20 +212,30 @@ function initDhBd(myuid) {
 
 function setDhPublic(myuid, sid) {
 	let siddb_sorted = Object.fromEntries(Object.entries(gSidDb).sort());
+
+	let pubok = true;
+	let cnt = 0;
 	let users = "";
 	for (let userid in siddb_sorted) {
+		//console.log("Found sid " +  gSidDb[userid] + " for user " + userid);
+		if(!isEqualSid(gSidDb[userid], sid)) {
+			pubok = false;
+			break;
+		}
 		users += userid;
+		cnt++;
 	}
-	const userarr = StringToUint8(users);
-	let arr = new Uint8Array(sid.byteLength + gMyDhKey.bdpw.byteLength + userarr.byteLength);
-	arr.set(sid, 0);
-	arr.set(gMyDhKey.bdpw, sid.byteLength);
-	arr.set(userarr, sid.byteLength + gMyDhKey.bdpw.byteLength);
-	const sha512 = nacl.hash(arr);
-	gMyDhKey.group = ristretto255.fromHash(sha512);
-	gMyDhKey.private = ristretto255.scalar.getRandom();
-	gMyDhKey.public = ristretto255.scalarMult(gMyDhKey.private, gMyDhKey.group);
-	if (gMyDhKey.public) {
+	if(cnt > 1 && pubok) {
+		//console.log("Setting public key for sid " + sid + " cnt " + cnt);
+		const userarr = StringToUint8(users);
+		let arr = new Uint8Array(sid.byteLength + gMyDhKey.bdpw.byteLength + userarr.byteLength);
+		arr.set(sid, 0);
+		arr.set(gMyDhKey.bdpw, sid.byteLength);
+		arr.set(userarr, sid.byteLength + gMyDhKey.bdpw.byteLength);
+		const sha512 = nacl.hash(arr);
+		gMyDhKey.group = ristretto255.fromHash(sha512);
+		gMyDhKey.private = ristretto255.scalar.getRandom();
+		gMyDhKey.public = ristretto255.scalarMult(gMyDhKey.private, gMyDhKey.group);
 		gDhDb[myuid] = Uint8ToString(gMyDhKey.public);
 	}
 }
@@ -557,42 +567,12 @@ function processOnMessageData(msg) {
 		if(!gSidDb[uid]) {
 			gSidDb[uid] = sid;
 			if(gMyDhKey.public) {
-				//reset
-				let siddb_sorted = Object.fromEntries(Object.entries(gSidDb).sort());
-
-				let pubok = true;
-				let cnt = 0;
-				for (let userid in siddb_sorted) {
-					//console.log("Found sid " +  gSidDb[userid] + " for user " + userid);
-					if(!isEqualSid(gSidDb[userid], sid)) {
-						pubok = false;
-						break;
-					}
-					cnt++;
-				}
-				if(cnt > 1 && pubok) {
-					console.log("Resetting public key for sid " + sid + " cnt " + cnt);
-					setDhPublic(myuid, sid);
-				}
+				//console.log("Resetting public key for sid " + sid + " cnt " + cnt);
+				setDhPublic(myuid, sid);
 			}
 		}
 		else if(isEqualSid(gSidDb[uid], sid) && !gMyDhKey.public) {
-			let siddb_sorted = Object.fromEntries(Object.entries(gSidDb).sort());
-
-			let pubok = true;
-			let cnt = 0;
-			for (let userid in siddb_sorted) {
-				//console.log("Found sid " +  gSidDb[userid] + " for user " + userid);
-				if(!isEqualSid(gSidDb[userid], sid)) {
-					pubok = false;
-					break;
-				}
-				cnt++;
-			}
-			if(cnt > 1 && pubok) {
-				//console.log("Setting public key for sid " + sid + " cnt " + cnt);
-				setDhPublic(myuid, sid);
-			}
+			setDhPublic(myuid, sid);
 		}
 	}
 
