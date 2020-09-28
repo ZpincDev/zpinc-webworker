@@ -225,7 +225,7 @@ function setDhPublic(myuid, sid) {
 		users += userid;
 		cnt++;
 	}
-	if(cnt > 1 && pubok) {
+	if(pubok && cnt > 1) {
 		//console.log("Setting public key for sid " + sid + " cnt " + cnt);
 		const userarr = StringToUint8(users);
 		let arr = new Uint8Array(sid.byteLength + gMyDhKey.bdpw.byteLength + userarr.byteLength);
@@ -253,7 +253,7 @@ function bdSetZeroes() {
 	return Uint8ToString(bdin);
 }
 
-const BDDEBUG = true;
+const BDDEBUG = false;
 function processBd(myuid, uid, msgtype, message) {
 	let init = false;
 
